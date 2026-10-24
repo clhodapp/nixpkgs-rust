@@ -27,7 +27,12 @@
   passthru ? { },
 }:
 stdenv.mkDerivation {
-  inherit pname src meta passthru;
+  inherit
+    pname
+    src
+    meta
+    passthru
+    ;
   version = "0.1.0";
 
   cargoDeps = rustPlatform.importCargoLock { lockFile = ../Cargo.lock; };
