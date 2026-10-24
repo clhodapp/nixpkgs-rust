@@ -254,14 +254,14 @@ impl Compiler {
 
     /// Ends the innermost unit and returns the code id and the captured
     /// values, as Rust expressions in the enclosing unit.
-    fn end_unit(&mut self, body: String) -> (String, String) {
+    fn end_unit(&mut self, body: String) -> (String, Vec<String>) {
         let u = self.units.pop().unwrap();
         let id = self.place(u.pre, body);
         let caps: Vec<String> = u.caps.iter().map(|&b| format!("{}.clone()", self.access(b))).collect();
-        (format!("CodeId({id})"), format!("Box::new([{}])", caps.join(", ")))
+        (format!("CodeId({id})"), caps)
     }
 
-    fn unit<F>(&mut self, f: F) -> Res<(String, String)>
+    fn unit_caps<F>(&mut self, f: F) -> Res<(String, Vec<String>)>
     where
         F: FnOnce(&mut Self) -> Res<String>,
     {
@@ -275,6 +275,26 @@ impl Compiler {
                 Err(e)
             }
         }
+    }
+
+    /// Generates a unit and returns its code id and its captured values as
+    /// the boxed slice a thunk or lambda takes.
+    fn unit<F>(&mut self, f: F) -> Res<(String, String)>
+    where
+        F: FnOnce(&mut Self) -> Res<String>,
+    {
+        let (id, caps) = self.unit_caps(f)?;
+        Ok((id, format!("Box::new([{}])", caps.join(", "))))
+    }
+
+    /// Generates a unit that runs where it is created rather than lazily,
+    /// to split the code of one large construct over several functions.
+    fn unit_now<F>(&mut self, f: F) -> Res<String>
+    where
+        F: FnOnce(&mut Self) -> Res<String>,
+    {
+        let (id, caps) = self.unit_caps(f)?;
+        Ok(format!("run({id}, &[{}], Value::Null)?", caps.join(", ")))
     }
 
     /// The Rust place holding a binding in the innermost unit, capturing it
@@ -475,11 +495,8 @@ impl Compiler {
                 format!("{{ let {local} = {ns}; {} }}", body?)
             }
             List(l) => {
-                let mut items = Vec::new();
-                for x in l.items() {
-                    items.push(self.lazy(&x)?);
-                }
-                format!("Value::list(vec![{}])", items.join(", "))
+                let items: Vec<ast::Expr> = l.items().collect();
+                self.list_items(&items)?
             }
             AttrSet(s) => {
                 if s.rec_token().is_some() {
@@ -792,10 +809,17 @@ impl Compiler {
             }
             let body = c.expr(&body_e);
             c.scopes.pop();
+            // The body checks its arguments against the description.
+            c.units.last_mut().unwrap().pre.push_str(&info);
             Ok(format!("{{ {stmts}{} }}", body?))
         })?;
-        self.units.last_mut().unwrap().pre.push_str(&info);
-        Ok(format!("Value::lambda({id}, {env}, &{info_name})"))
+        // The creating unit may land in another crate than the body, and
+        // generated crates do not refer to each other, so it gets its own
+        // copy of the description under another name.
+        let creator_name = format!("M{}", &info_name[1..]);
+        let creator_info = info.replacen(&format!("static {info_name}:"), &format!("static {creator_name}:"), 1);
+        self.units.last_mut().unwrap().pre.push_str(&creator_info);
+        Ok(format!("Value::lambda({id}, {env}, &{creator_name})"))
     }
 
     /// Fills a blank thunk with an expression.
@@ -946,14 +970,57 @@ impl Compiler {
         Ok(())
     }
 
-    /// The value of a node in a non-recursive set, unevaluated.
-    fn node_value(&mut self, node: &Node, temps: &[String]) -> Res<String> {
+    /// The value of a node in a non-recursive set, unevaluated. `temps` are
+    /// the bindings holding the `e` of each `inherit (e)` of the set.
+    fn node_value(&mut self, node: &Node, temps: &[u32]) -> Res<String> {
         Ok(match node {
             Node::Leaf(e, _) => self.lazy(e)?,
             Node::InheritOuter(n, _) => self.lazy_var(n, 0)?,
-            Node::InheritFrom(t, n, _) => format!("Value::sel({}.clone(), Sym({}))", temps[*t], self.sym(n)),
+            Node::InheritFrom(t, n, _) => {
+                let place = self.access(temps[*t]);
+                format!("Value::sel({place}.clone(), Sym({}))", self.sym(n))
+            }
             Node::Set(s) => self.set_value(s)?,
         })
+    }
+
+    /// Static attributes, sorted by symbol, as a set value: built in one
+    /// function, or in several when the source is large.
+    fn static_entries(&mut self, entries: &[(u32, &Node)], temps: &[u32]) -> Res<String> {
+        let total: usize = entries.iter().map(|e| node_src_len(e.1)).sum();
+        // A single entry is not split; its value is split where it is built.
+        if total <= 2 * CHUNK || entries.len() <= 1 {
+            let mut list = Vec::with_capacity(entries.len());
+            for (s, node) in entries {
+                let v = self.node_value(node, temps)?;
+                list.push(format!("Attr {{ k: Sym({s}), v: {v}, pos: Pos({}) }}", node.pos()));
+            }
+            return Ok(format!("attrs_static(vec![{}])", list.join(", ")));
+        }
+        let mut parts = Vec::new();
+        for chunk in chunks_by(entries, |e| node_src_len(e.1)) {
+            parts.push(self.unit_now(|c| c.static_entries(chunk, temps))?);
+        }
+        Ok(format!("concat_attrs(vec![{}])?", parts.join(", ")))
+    }
+
+    /// The elements of a list, built in one function or, when the source is
+    /// large, in several.
+    fn list_items(&mut self, items: &[ast::Expr]) -> Res<String> {
+        let len = |e: &ast::Expr| u32::from(e.syntax().text_range().len()) as usize;
+        let total: usize = items.iter().map(len).sum();
+        if total <= 2 * CHUNK || items.len() <= 1 {
+            let mut out = Vec::with_capacity(items.len());
+            for x in items {
+                out.push(self.lazy(x)?);
+            }
+            return Ok(format!("Value::list(vec![{}])", out.join(", ")));
+        }
+        let mut parts = Vec::new();
+        for chunk in chunks_by(items, len) {
+            parts.push(self.unit_now(|c| c.list_items(chunk))?);
+        }
+        Ok(format!("concat_list_parts(vec![{}])?", parts.join(", ")))
     }
 
     /// A nested set as an attribute value: built in place when it has only
@@ -979,26 +1046,17 @@ impl Compiler {
         let mut temps = Vec::new();
         for t in &set.temps {
             let code = self.lazy(t)?;
-            let local = format!("t{}", self.next_static);
-            self.next_static += 1;
+            let (b, local) = self.new_binding();
             let _ = write!(pre, "let {local} = {code}; ");
-            temps.push(local);
+            temps.push(b);
         }
-        let mut entries = Vec::new();
-        for (k, node) in &set.statics {
-            let v = self.node_value(node, &temps)?;
-            entries.push((self.sym(k), v, node.pos()));
-        }
+        let mut entries: Vec<(u32, &Node)> = set.statics.iter().map(|(k, n)| (self.syms.sym(k), n)).collect();
         entries.sort_by_key(|e| e.0);
-        let list: Vec<String> = entries
-            .into_iter()
-            .map(|(s, v, p)| format!("Attr {{ k: Sym({s}), v: {v}, pos: Pos({p}) }}"))
-            .collect();
+        let core = self.static_entries(&entries, &temps)?;
         if set.dynamics.is_empty() {
-            let core = format!("attrs_static(vec![{}])", list.join(", "));
             return Ok(if pre.is_empty() { core } else { format!("{{ {pre}{core} }}") });
         }
-        let mut code = format!("{{ {pre}let mut a_ = Attrs::from_sorted(vec![{}]); ", list.join(", "));
+        let mut code = format!("{{ {pre}let mut a_ = (*force_attrs(&({core}))?).clone(); ");
         for (k, node, p) in &set.dynamics {
             let key = self.expr(k)?;
             let v = self.node_value(node, &temps)?;
@@ -1114,48 +1172,65 @@ impl Compiler {
                 break;
             }
         }
-        let temp_locals: Vec<String> = items[..ntemps].iter().map(|it| it.local.clone()).collect();
+        let temp_bindings: Vec<u32> = items[..ntemps].iter().map(|it| it.binding).collect();
         let mut code = String::new();
         for (pl, _, _, _) in &proxy_list {
             let _ = write!(code, "let {pl} = Value::blank(); ");
         }
+        // A large group keeps its thunks in one vector instead of a local
+        // each, and fills them from several functions.
+        let total: usize = items.iter().map(|it| node_src_len(&it.node)).sum();
+        let big = !proxies && (total > 2 * CHUNK || items.len() > 512);
+        if big {
+            direct.iter_mut().for_each(|d| *d = false);
+            order.clear();
+            let g = format!("g{}", self.next_static);
+            self.next_static += 1;
+            let _ = write!(code, "let {g} = Value::blanks({}); ", items.len());
+            for (i, it) in items.iter_mut().enumerate() {
+                let place = format!("{g}[{i}]");
+                self.bindings[it.binding as usize].local = place.clone();
+                it.local = place;
+            }
+        }
         for &i in &order {
             let v = match &items[i].node {
                 Node::InheritOuter(n, _) => self.lazy_var(n, 1)?,
-                node => self.node_value(node, &temp_locals)?,
+                node => self.node_value(node, &temp_bindings)?,
             };
             let _ = write!(code, "let {} = {v}; ", items[i].local);
         }
-        for (i, it) in items.iter().enumerate() {
-            if !direct[i] {
-                let _ = write!(code, "let {} = Value::blank(); ", it.local);
+        if !big {
+            for (i, it) in items.iter().enumerate() {
+                if !direct[i] {
+                    let _ = write!(code, "let {} = Value::blank(); ", it.local);
+                }
             }
         }
-        for i in 0..items.len() {
-            if direct[i] {
-                continue;
-            }
-            let local = items[i].local.clone();
-            let init = match &items[i].node {
-                Node::Leaf(e, _) => self.init_code(&local, e)?,
-                Node::InheritOuter(n, _) => format!("{local}.init_value({});", self.lazy_var(n, 1)?),
-                Node::InheritFrom(t, n, _) => format!(
-                    "{local}.init_value(Value::sel({}.clone(), Sym({})));",
-                    temp_locals[*t],
-                    self.sym(n)
-                ),
-                Node::Set(s) => {
-                    if s.has_dynamic() {
-                        let s = (**s).clone();
-                        let (id, env) = self.unit(move |c| c.any_set(s))?;
-                        format!("{local}.init({id}, {env});")
-                    } else {
-                        format!("{local}.init_value({});", self.any_set((**s).clone())?)
+        let pending: Vec<(u32, Node)> = items
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !direct[*i])
+            .map(|(_, it)| (it.binding, it.node.clone()))
+            .collect();
+        if big {
+            for chunk in chunks_by(&pending, |p| node_src_len(&p.1)) {
+                let call = self.unit_now(|c| {
+                    let mut body = String::from("{ ");
+                    for (b, node) in chunk {
+                        body.push_str(&c.item_init(*b, node, &temp_bindings)?);
+                        body.push(' ');
                     }
-                }
-            };
-            code.push_str(&init);
-            code.push(' ');
+                    body.push_str("Value::Null }");
+                    Ok(body)
+                })?;
+                let _ = write!(code, "{call}; ");
+            }
+        } else {
+            for (b, node) in &pending {
+                code.push_str(&self.item_init(*b, node, &temp_bindings)?);
+                code.push(' ');
+            }
         }
         let mut attrs: Vec<(String, u32, u64)> = items
             .iter()
@@ -1169,11 +1244,8 @@ impl Compiler {
                 .expect("proxies need __overrides");
             for (pl, pb, idx, n) in &proxy_list {
                 let s = self.sym(n);
-                let _ = write!(
-                    code,
-                    "{pl}.init_value(override_or({ov}.clone(), Sym({s}), {}.clone())); ",
-                    items[*idx].local
-                );
+                let own = items[*idx].local.clone();
+                let _ = write!(code, "{pl}.init_value(override_or({ov}.clone(), Sym({s}), {own}.clone())); ");
                 for a in attrs.iter_mut() {
                     if &a.0 == n {
                         a.1 = *pb;
@@ -1183,6 +1255,46 @@ impl Compiler {
         }
         set.temps = Vec::new();
         Ok((code, attrs))
+    }
+
+    /// Fills the blank thunk of one binding of a group.
+    fn item_init(&mut self, b: u32, node: &Node, temps: &[u32]) -> Res<String> {
+        let place = self.access(b);
+        Ok(match node {
+            Node::Leaf(e, _) => self.init_code(&place, e)?,
+            Node::InheritOuter(n, _) => format!("{place}.init_value({});", self.lazy_var(n, 1)?),
+            Node::InheritFrom(t, n, _) => {
+                let tp = self.access(temps[*t]);
+                format!("{place}.init_value(Value::sel({tp}.clone(), Sym({})));", self.sym(n))
+            }
+            Node::Set(s) => {
+                if s.has_dynamic() {
+                    let s = (**s).clone();
+                    let (id, env) = self.unit(move |c| c.any_set(s))?;
+                    format!("{place}.init({id}, {env});")
+                } else {
+                    format!("{place}.init_value({});", self.any_set((**s).clone())?)
+                }
+            }
+        })
+    }
+
+    /// The attributes of a recursive set, (symbol, binding, position) sorted
+    /// by symbol, as a set value; in several functions when there are many.
+    fn rec_entries(&mut self, entries: &[(u32, u32, u64)]) -> Res<String> {
+        if entries.len() <= 512 {
+            let mut list = Vec::with_capacity(entries.len());
+            for (s, b, p) in entries {
+                let place = self.access(*b);
+                list.push(format!("Attr {{ k: Sym({s}), v: {place}.clone(), pos: Pos({p}) }}"));
+            }
+            return Ok(format!("attrs_static(vec![{}])", list.join(", ")));
+        }
+        let mut parts = Vec::new();
+        for chunk in entries.chunks(512) {
+            parts.push(self.unit_now(|c| c.rec_entries(chunk))?);
+        }
+        Ok(format!("concat_attrs(vec![{}])?", parts.join(", ")))
     }
 
     /// A recursive set. A static `__overrides` attribute, a legacy feature,
@@ -1202,20 +1314,13 @@ impl Compiler {
         let proxies = set.statics.contains_key("__overrides");
         let (decls, attrs) = self.group_with(set, proxies)?;
         let result = (|| -> Res<String> {
-            let mut entries = Vec::new();
-            for (n, b, p) in attrs {
-                let place = self.access(b);
-                entries.push((self.sym(&n), format!("{place}.clone()"), p));
-            }
+            let mut entries: Vec<(u32, u32, u64)> = attrs.iter().map(|(n, b, p)| (self.syms.sym(n), *b, *p)).collect();
             entries.sort_by_key(|e| e.0);
-            let list: Vec<String> = entries
-                .into_iter()
-                .map(|(s, v, p)| format!("Attr {{ k: Sym({s}), v: {v}, pos: Pos({p}) }}"))
-                .collect();
+            let core = self.rec_entries(&entries)?;
             if dynamics.is_empty() {
-                return Ok(format!("{{ {decls}attrs_static(vec![{}]) }}", list.join(", ")));
+                return Ok(format!("{{ {decls}{core} }}"));
             }
-            let mut code = format!("{{ {decls}let mut a_ = Attrs::from_sorted(vec![{}]); ", list.join(", "));
+            let mut code = format!("{{ {decls}let mut a_ = (*force_attrs(&({core}))?).clone(); ");
             for (k, node, p) in &dynamics {
                 let key = self.expr(k)?;
                 let v = self.node_value(node, &[])?;
@@ -1227,6 +1332,42 @@ impl Compiler {
         self.scopes.pop();
         result
     }
+}
+
+/// The amount of Nix source, in bytes, that one generated function takes
+/// at most when a large set, list or group is split over several.
+const CHUNK: usize = 16 * 1024;
+
+/// The size of the source behind a node.
+fn node_src_len(n: &Node) -> usize {
+    match n {
+        Node::Leaf(e, _) => u32::from(e.syntax().text_range().len()) as usize,
+        Node::InheritOuter(..) | Node::InheritFrom(..) => 8,
+        Node::Set(s) => {
+            16 + s.statics.values().map(node_src_len).sum::<usize>()
+                + s.dynamics.iter().map(|d| node_src_len(&d.1)).sum::<usize>()
+        }
+    }
+}
+
+/// Splits items into consecutive runs of about [`CHUNK`] bytes of source.
+fn chunks_by<T>(items: &[T], len: impl Fn(&T) -> usize) -> Vec<&[T]> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    let mut acc = 0;
+    for (i, x) in items.iter().enumerate() {
+        let l = len(x);
+        if acc > 0 && acc + l > CHUNK {
+            out.push(&items[start..i]);
+            start = i;
+            acc = 0;
+        }
+        acc += l;
+    }
+    if start < items.len() {
+        out.push(&items[start..]);
+    }
+    out
 }
 
 fn shift_temps(n: Node, offset: usize) -> Node {

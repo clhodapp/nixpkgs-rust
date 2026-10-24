@@ -3,6 +3,9 @@
 //! ```text
 //! <program> eval [FILE] [-A ATTRPATH] [--arg NAME VALUE] [--argstr NAME STRING] [--json|--xml]
 //! <program> instantiate [FILE] -A ATTRPATH [...]
+//! <program> build [FILE] -A ATTRPATH [-o LINK | --no-link] [-v] [...]
+//! <program> install|remove [FILE] -A ATTRPATH... [--profile PROFILE] [-v] [...]
+//! <program> list [--profile PROFILE]
 //! <program> lang-tests
 //! ```
 //!
@@ -11,8 +14,8 @@
 //! pattern is called with the `--arg`/`--argstr` values, and so is every
 //! such function met while following `-A`. A compiled program cannot parse
 //! Nix at run time, so `--arg` accepts only literals (`true`, `false`,
-//! `null`, integers, strings in double quotes) and `import PATH` of a
-//! compiled file.
+//! `null`, integers, strings in double quotes, `{}`, `[]`) and `import PATH`
+//! of a compiled file.
 
 use std::rc::Rc;
 
@@ -29,6 +32,15 @@ pub struct EvalOpts {
     pub attr: Option<String>,
     pub args: Vec<(String, ArgValue)>,
     pub output: Output,
+    /// For `build`: the `-o` link, unless `--no-link` was given.
+    pub out_link: Option<String>,
+    pub no_link: bool,
+    /// For `build`: show the daemon's log.
+    pub verbose: bool,
+    /// Every `-A` given, for `install` and `remove`.
+    pub attrs: Vec<String>,
+    /// For `install`, `remove` and `list`: the profile.
+    pub profile: Option<String>,
 }
 
 #[derive(Clone, Copy, Default, PartialEq)]
@@ -55,7 +67,12 @@ fn parse_opts(args: &[String]) -> Result<EvalOpts, String> {
             args.get(i).cloned().ok_or_else(|| format!("option '{a}' needs an argument"))
         };
         match a {
-            "-A" | "--attr" => o.attr = Some(next()?),
+            "-A" | "--attr" => {
+                let v = next()?;
+                o.attrs.push(v.clone());
+                o.attr = Some(v);
+            }
+            "-p" | "--profile" => o.profile = Some(next()?),
             "--arg" => {
                 let n = next()?;
                 let v = next()?;
@@ -68,6 +85,9 @@ fn parse_opts(args: &[String]) -> Result<EvalOpts, String> {
             }
             "--json" => o.output = Output::Json,
             "--xml" => o.output = Output::Xml,
+            "-o" | "--out-link" => o.out_link = Some(next()?),
+            "--no-link" => o.no_link = true,
+            "-v" | "--verbose" => o.verbose = true,
             "--strict" | "--eval" | "--no-location" | "--impure" => {}
             s if s.starts_with('-') => return Err(format!("unknown option '{s}'")),
             s => o.file = Some(s.to_string()),
@@ -87,6 +107,8 @@ fn arg_value(v: &ArgValue) -> R<Value> {
                 "true" => return Ok(Value::Bool(true)),
                 "false" => return Ok(Value::Bool(false)),
                 "null" => return Ok(Value::Null),
+                "{}" | "{ }" => return Ok(Value::attrs(Attrs::new())),
+                "[]" | "[ ]" => return Ok(Value::list(Vec::new())),
                 _ => {}
             }
             if let Ok(i) = e.parse::<i64>() {
@@ -169,6 +191,14 @@ pub fn find_attr_path(mut v: Value, path: &str, args: &Rc<Attrs>) -> R<Value> {
 
 /// Evaluates the value the options name.
 pub fn eval_opts(o: &EvalOpts) -> R<Value> {
+    let (v, args) = root_value(o)?;
+    let v = auto_call(v, &args)?;
+    find_attr_path(v, o.attr.as_deref().unwrap_or(""), &args)
+}
+
+/// The value of the file the options name, before any automatic call, and
+/// the `--arg`/`--argstr` arguments.
+pub fn root_value(o: &EvalOpts) -> R<(Value, Rc<Attrs>)> {
     let mut e = Vec::new();
     for (n, v) in &o.args {
         e.push(Attr {
@@ -184,8 +214,7 @@ pub fn eval_opts(o: &EvalOpts) -> R<Value> {
     } else {
         program::import_rel(&file)?
     };
-    let v = auto_call(v, &args)?;
-    find_attr_path(v, o.attr.as_deref().unwrap_or(""), &args)
+    Ok((v, args))
 }
 
 /// Renders a value for `eval`.
@@ -264,10 +293,71 @@ pub fn main(p: &'static Program, default_root: &'static str) {
                 2
             }
         },
+        Some("build") => match parse_opts(&args[1..]) {
+            Ok(o) => on_eval_thread(p, root, move || {
+                let bo = crate::build::BuildOpts {
+                    out_link: if o.no_link {
+                        None
+                    } else {
+                        Some(o.out_link.clone().unwrap_or_else(|| "result".to_string()))
+                    },
+                    verbose: o.verbose,
+                };
+                match eval_opts(&o).and_then(|v| crate::build::build(&v, &bo)) {
+                    Ok(out) => {
+                        println!("{out}");
+                        0
+                    }
+                    Err(e) => report(&e),
+                }
+            }),
+            Err(e) => {
+                eprintln!("error: {e}");
+                2
+            }
+        },
+        Some(cmd @ ("install" | "remove" | "list")) => {
+            let cmd = cmd.to_string();
+            match parse_opts(&args[1..]) {
+                Ok(o) => on_eval_thread(p, root, move || {
+                    let profile = o
+                        .profile
+                        .clone()
+                        .map(std::path::PathBuf::from)
+                        .unwrap_or_else(crate::install::default_profile);
+                    if cmd == "list" {
+                        for a in crate::install::installed(&profile) {
+                            println!("{a}");
+                        }
+                        return 0;
+                    }
+                    if o.attrs.is_empty() {
+                        eprintln!("error: name the packages with -A ATTRPATH");
+                        return 2;
+                    }
+                    let res = if cmd == "install" {
+                        crate::install::install(&o, &profile, &o.attrs, o.verbose)
+                    } else {
+                        crate::install::remove(&o, &profile, &o.attrs, o.verbose)
+                    };
+                    match res {
+                        Ok(out) => {
+                            println!("{} -> {out}", profile.display());
+                            0
+                        }
+                        Err(e) => report(&e),
+                    }
+                }),
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    2
+                }
+            }
+        }
         Some("lang-tests") => crate::langtests::run(p, &root),
         _ => {
             eprintln!(
-                "usage: {} eval|instantiate [FILE] [-A ATTRPATH] [--arg NAME VALUE] [--argstr NAME STRING]",
+                "usage: {} eval|instantiate|build [FILE] [-A ATTRPATH] [--arg NAME VALUE] [--argstr NAME STRING]",
                 std::env::args().next().unwrap_or_default()
             );
             2

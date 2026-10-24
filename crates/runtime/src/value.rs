@@ -166,6 +166,12 @@ impl Value {
         Value::Thunk(Rc::new(Thunk(RefCell::new(ThunkState::Blank))))
     }
 
+    /// `n` thunks to be filled with [`Value::init`], for the bindings of a
+    /// large `let` or recursive set.
+    pub fn blanks(n: usize) -> Vec<Value> {
+        (0..n).map(|_| Value::blank()).collect()
+    }
+
     /// Fills a thunk made by [`Value::blank`].
     #[inline]
     pub fn init(&self, code: CodeId, env: Box<[Value]>) {

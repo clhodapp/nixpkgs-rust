@@ -6,12 +6,15 @@
 
 pub mod aterm;
 pub mod attrs;
+pub mod build;
 pub mod builtins;
 pub mod cli;
 pub mod context;
 pub mod corepkgs;
+pub mod daemon;
 pub mod derivation;
 pub mod error;
+pub mod install;
 pub mod json;
 pub mod langtests;
 pub mod ops;
@@ -36,6 +39,6 @@ pub mod prelude {
     pub use crate::string::NixStr;
     pub use crate::symbol::Sym;
     pub use crate::value::{
-        CodeId, CrateTables, Formals, LambdaInfo, Pos, PosInfo, Value, call, force,
+        CodeId, CrateTables, Formals, LambdaInfo, Pos, PosInfo, Value, call, force, run,
     };
 }

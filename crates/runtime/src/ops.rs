@@ -663,6 +663,25 @@ pub fn apply_overrides(v: Value) -> R<Value> {
     }
 }
 
+/// Joins the parts of a large attribute set the compiler built in pieces.
+/// Each part holds names that sort after the names of the part before it.
+pub fn concat_attrs(parts: Vec<Value>) -> R<Value> {
+    let mut e = Vec::new();
+    for p in &parts {
+        e.extend(force_attrs(p)?.iter().cloned());
+    }
+    Ok(Value::attrs(Attrs::from_sorted(e)))
+}
+
+/// Joins the parts of a large list the compiler built in pieces.
+pub fn concat_list_parts(parts: Vec<Value>) -> R<Value> {
+    let mut e = Vec::new();
+    for p in &parts {
+        e.extend(force_list(p)?.iter().cloned());
+    }
+    Ok(Value::list(e))
+}
+
 /// Builds a static attribute set from entries the compiler sorted by id.
 pub fn attrs_static(e: Vec<Attr>) -> Value {
     Value::attrs(Attrs::from_sorted(e))

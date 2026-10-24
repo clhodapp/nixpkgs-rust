@@ -65,8 +65,10 @@ incremental = false
 [profile.dev.package.nixpkgs-rust-runtime]
 opt-level = 2
 
+# The generated crates are many and large, so optimising them would multiply
+# the build time; the time evaluation spends is mostly in the runtime.
 [profile.release]
-opt-level = 1
+opt-level = 0
 debug = false
 codegen-units = 16
 incremental = false
