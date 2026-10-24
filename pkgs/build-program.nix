@@ -25,6 +25,10 @@
   alsoExt ? [ ],
   meta ? { },
   passthru ? { },
+  # The most rustc processes at once. Each generated crate takes about 1 to
+  # 2 GB to compile, so the build uses at most `jobs` times that, whatever
+  # the number of cores; using every core can exhaust a machine's memory.
+  jobs ? 8,
 }:
 stdenv.mkDerivation {
   inherit
@@ -55,7 +59,8 @@ stdenv.mkDerivation {
     # The generated workspace needs the dependency versions of the runtime;
     # cargo adds the generated crates to the lock on its own.
     cp Cargo.lock gen/Cargo.lock
-    (cd gen && cargo build --release --offline -j "$NIX_BUILD_CORES")
+    j=$(( NIX_BUILD_CORES < ${toString jobs} ? NIX_BUILD_CORES : ${toString jobs} ))
+    (cd gen && cargo build --release --offline -j "$j")
     runHook postBuild
   '';
 

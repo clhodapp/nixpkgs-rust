@@ -10,9 +10,20 @@
   path,
   buildNixProgram,
 }:
+let
+  # Interpolating `path` would copy the tree to a new store path named after
+  # the old one, and the binary would then not recognise imports of the
+  # original tree. Copying it under its own name yields the same store path.
+  base = baseNameOf (toString path);
+  storeName = if builtins.match "[0-9a-z]{32}-.*" base != null then builtins.substring 33 (-1) base else base;
+  root = builtins.path {
+    inherit path;
+    name = storeName;
+  };
+in
 buildNixProgram {
   pname = "nixpkgs-rust";
-  root = path;
+  inherit root;
   # The nixpkgs tree that was compiled, for comparisons with Nix.
   passthru.nixpkgsPath = path;
   meta = {
