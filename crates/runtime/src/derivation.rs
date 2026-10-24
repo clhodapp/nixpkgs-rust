@@ -85,7 +85,16 @@ impl Derivation {
     /// The ATerm form of the derivation. With `actual_inputs`, the input
     /// derivations are replaced by the given map, as modulo hashing does.
     pub fn unparse(&self, mask_outputs: bool, actual_inputs: Option<&BTreeMap<String, BTreeSet<String>>>) -> Vec<u8> {
-        let mut s: Vec<u8> = Vec::with_capacity(4096);
+        // Room for the whole text, so that it is written without reallocating.
+        let estimate = 256
+            + self.env.iter().map(|(k, v)| k.len() + v.len() + 8).sum::<usize>()
+            + self.args.iter().map(|a| a.len() + 4).sum::<usize>()
+            + self.input_srcs.iter().map(|p| p.len() + 4).sum::<usize>()
+            + self.input_drvs.len() * 96
+            + self.outputs.len() * 160
+            + self.builder.len()
+            + self.structured.as_ref().map_or(0, |j| j.len() + 16);
+        let mut s: Vec<u8> = Vec::with_capacity(estimate);
         s.extend_from_slice(b"Derive([");
         for (n, (o, out)) in self.outputs.iter().enumerate() {
             if n > 0 {
@@ -189,27 +198,54 @@ fn unquoted(s: &mut Vec<u8>, v: &[u8]) {
 }
 
 fn escaped(s: &mut Vec<u8>, v: &[u8]) {
+    s.reserve(v.len() + 2);
     s.push(b'"');
-    for &c in v {
-        match c {
-            b'"' | b'\\' => {
-                s.push(b'\\');
-                s.push(c);
-            }
-            b'\n' => s.extend_from_slice(b"\\n"),
-            b'\r' => s.extend_from_slice(b"\\r"),
-            b'\t' => s.extend_from_slice(b"\\t"),
-            _ => s.push(c),
-        }
+    // Copy runs of bytes that need no escape in one go.
+    let mut start = 0;
+    for (i, &c) in v.iter().enumerate() {
+        let esc: &[u8] = match c {
+            b'"' => b"\\\"",
+            b'\\' => b"\\\\",
+            b'\n' => b"\\n",
+            b'\r' => b"\\r",
+            b'\t' => b"\\t",
+            _ => continue,
+        };
+        s.extend_from_slice(&v[start..i]);
+        s.extend_from_slice(esc);
+        start = i + 1;
     }
+    s.extend_from_slice(&v[start..]);
     s.push(b'"');
 }
 
 /// The modulo hash of each output of a derivation.
-pub type DrvHash = BTreeMap<String, Hash>;
+/// Shared, as every derivation that uses another looks its hash up.
+pub type DrvHash = Rc<BTreeMap<String, Hash>>;
 
-/// `hashDerivationModulo`.
-pub fn hash_derivation_modulo(drv: &Derivation, mask_outputs: bool) -> R<DrvHash> {
+/// The input derivations of a derivation as modulo hashing writes them:
+/// each input replaced by the modulo hash of the outputs it is used for.
+pub fn modulo_inputs(drv: &Derivation) -> R<BTreeMap<String, BTreeSet<String>>> {
+    let mut inputs2: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (d, outs) in &drv.input_drvs {
+        let h = path_derivation_modulo(d)?;
+        for o in outs {
+            let hh = h
+                .get(o)
+                .ok_or_else(|| Error::eval(format!("no hash for output '{o}' of derivation '{}'", drv.name)))?;
+            inputs2.entry(hh.hex()).or_default().insert(o.clone());
+        }
+    }
+    Ok(inputs2)
+}
+
+/// `hashDerivationModulo`. `inputs` is [`modulo_inputs`] of the
+/// derivation, which a caller hashing the same derivation twice computes once.
+pub fn hash_derivation_modulo(
+    drv: &Derivation,
+    mask_outputs: bool,
+    inputs: Option<&BTreeMap<String, BTreeSet<String>>>,
+) -> R<DrvHash> {
     if drv.is_fixed() {
         let mut m = BTreeMap::new();
         for (o, out) in &drv.outputs {
@@ -223,20 +259,18 @@ pub fn hash_derivation_modulo(drv: &Derivation, mask_outputs: bool) -> R<DrvHash
                 m.insert(o.clone(), Hash::sha256(s.as_bytes()));
             }
         }
-        return Ok(m);
+        return Ok(Rc::new(m));
     }
-    let mut inputs2: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for (d, outs) in &drv.input_drvs {
-        let h = path_derivation_modulo(d)?;
-        for o in outs {
-            let hh = h
-                .get(o)
-                .ok_or_else(|| Error::eval(format!("no hash for output '{o}' of derivation '{}'", drv.name)))?;
-            inputs2.entry(hh.hex()).or_default().insert(o.clone());
+    let computed;
+    let inputs2 = match inputs {
+        Some(i) => i,
+        None => {
+            computed = modulo_inputs(drv)?;
+            &computed
         }
-    }
-    let hash = Hash::sha256(&drv.unparse(mask_outputs, Some(&inputs2)));
-    Ok(drv.outputs.keys().map(|o| (o.clone(), hash.clone())).collect())
+    };
+    let hash = Hash::sha256(&drv.unparse(mask_outputs, Some(inputs2)));
+    Ok(Rc::new(drv.outputs.keys().map(|o| (o.clone(), hash.clone())).collect()))
 }
 
 fn path_derivation_modulo(drv_path: &str) -> R<DrvHash> {
@@ -244,7 +278,7 @@ fn path_derivation_modulo(drv_path: &str) -> R<DrvHash> {
         return Ok(h);
     }
     let drv = lookup_drv(drv_path)?;
-    let h = hash_derivation_modulo(&drv, false)?;
+    let h = hash_derivation_modulo(&drv, false, None)?;
     STATE.with(|s| s.borrow_mut().drv_hashes.insert(drv_path.to_string(), h.clone()));
     Ok(h)
 }
@@ -495,6 +529,14 @@ fn derivation_strict_inner(attrs: &Attrs, drv_name: &str) -> R<Value> {
         ));
     }
 
+    // The input derivations as modulo hashing writes them, computed once for
+    // the hash with outputs masked and the hash of the finished derivation.
+    // A fixed-output derivation does not use them.
+    let inputs2 = if output_hash.is_some() {
+        BTreeMap::new()
+    } else {
+        modulo_inputs(&drv)?
+    };
     if let Some(oh) = output_hash {
         if outputs.len() != 1 || outputs[0] != "out" {
             return Err(Error::eval("multiple outputs are not supported in fixed-output derivations"));
@@ -518,7 +560,7 @@ fn derivation_strict_inner(attrs: &Attrs, drv_name: &str) -> R<Value> {
             drv.env.insert(o.clone(), Vec::new());
             drv.outputs.insert(o.clone(), Output::Deferred);
         }
-        let hashes = hash_derivation_modulo(&drv, true)?;
+        let hashes = hash_derivation_modulo(&drv, true, Some(&inputs2))?;
         for o in &outputs {
             let p = make_output_path(o, &hashes[o], drv_name);
             drv.env.insert(o.clone(), p.clone().into_bytes());
@@ -528,7 +570,7 @@ fn derivation_strict_inner(attrs: &Attrs, drv_name: &str) -> R<Value> {
 
     let text = drv.unparse(false, None);
     let drv_path = make_text_path(&format!("{drv_name}.drv"), &text, &drv.references());
-    let h = hash_derivation_modulo(&drv, false)?;
+    let h = hash_derivation_modulo(&drv, false, Some(&inputs2))?;
     let paths = drv.output_paths();
     STATE.with(|s| {
         let mut s = s.borrow_mut();

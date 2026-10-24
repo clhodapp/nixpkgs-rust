@@ -284,7 +284,7 @@ impl Compiler {
         F: FnOnce(&mut Self) -> Res<String>,
     {
         let (id, caps) = self.unit_caps(f)?;
-        Ok((id, format!("Box::new([{}])", caps.join(", "))))
+        Ok((id, format!("Env::from([{}])", caps.join(", "))))
     }
 
     /// Generates a unit that runs where it is created rather than lazily,
@@ -448,25 +448,25 @@ impl Compiler {
             PathAbs(_) | PathRel(_) | PathHome(_) | PathSearch(_) => self.path(e)?,
             Lambda(l) => self.lambda(l)?,
             Apply(a) => {
-                let f = self.expr(&need(a.lambda(), "function")?)?;
+                let f = self.operand(&need(a.lambda(), "function")?)?;
                 let x = self.lazy(&need(a.argument(), "argument")?)?;
                 format!("call(&({f}), {x})?")
             }
             Select(s) => self.select(s)?,
             HasAttr(h) => {
-                let base = self.expr(&need(h.expr(), "expression")?)?;
+                let base = self.operand(&need(h.expr(), "expression")?)?;
                 let path = self.attr_path(&need(h.attrpath(), "attribute path")?)?;
                 format!("Value::Bool(has_attr_path(&({base}), &{path})?)")
             }
             IfElse(i) => {
-                let c = self.expr(&need(i.condition(), "condition")?)?;
+                let c = self.operand(&need(i.condition(), "condition")?)?;
                 let t = self.expr(&need(i.body(), "then branch")?)?;
                 let f = self.expr(&need(i.else_body(), "else branch")?)?;
                 format!("if truthy(&({c}))? {{ {t} }} else {{ {f} }}")
             }
             Assert(a) => {
                 let cond_e = need(a.condition(), "condition")?;
-                let c = self.expr(&cond_e)?;
+                let c = self.operand(&cond_e)?;
                 let text = cond_e.syntax().text().to_string();
                 let b = self.expr(&need(a.body(), "body")?)?;
                 format!(
@@ -509,7 +509,7 @@ impl Compiler {
             }
             BinOp(b) => self.binop(b)?,
             UnaryOp(u) => {
-                let x = self.expr(&need(u.expr(), "operand")?)?;
+                let x = self.operand(&need(u.expr(), "operand")?)?;
                 match need(u.operator(), "operator")? {
                     ast::UnaryOpKind::Invert => format!("not(&({x}))?"),
                     ast::UnaryOpKind::Negate => format!("neg(&({x}))?"),
@@ -518,6 +518,19 @@ impl Compiler {
             CurPos(c) => format!("pos_value(Pos({}))", self.pos_of(c.syntax())),
             Error(_) => return Err("syntax error".to_string()),
         })
+    }
+
+    /// An expression whose value is only borrowed where it appears: a
+    /// variable bound by a `let`, a function argument or a recursive set is
+    /// used in place rather than cloned; anything else is evaluated as by
+    /// [`Compiler::expr`].
+    fn operand(&mut self, e: &ast::Expr) -> Res<String> {
+        if let ast::Expr::Ident(i) = unparen(e)
+            && let Some(Resolved::Lexical(b)) = self.resolve(&ident_text(&i), 0)
+        {
+            return Ok(self.access(b));
+        }
+        self.expr(e)
     }
 
     fn literal(&mut self, l: &ast::Literal) -> Res<String> {
@@ -534,7 +547,7 @@ impl Compiler {
                     .map_err(|_| format!("invalid float '{}'", f.syntax().text()))?;
                 format!("Value::Float(f64::from_bits({:#x}))", v.to_bits())
             }
-            ast::LiteralKind::Uri(u) => format!("Value::str(&{}[..])", rust_bytes(u.syntax().text().as_bytes())),
+            ast::LiteralKind::Uri(u) => format!("Value::lit({})", rust_bytes(u.syntax().text().as_bytes())),
         })
     }
 
@@ -544,14 +557,14 @@ impl Compiler {
             return Err("input string contains NUL byte".to_string());
         }
         match parts.as_slice() {
-            [] => return Ok("Value::str(&b\"\"[..])".to_string()),
-            [Part::Lit(b)] => return Ok(format!("Value::str(&{}[..])", rust_bytes(b))),
+            [] => return Ok("Value::lit(b\"\")".to_string()),
+            [Part::Lit(b)] => return Ok(format!("Value::lit({})", rust_bytes(b))),
             _ => {}
         }
         let mut items = Vec::new();
         for p in &parts {
             items.push(match p {
-                Part::Lit(b) => format!("Value::str(&{}[..])", rust_bytes(b)),
+                Part::Lit(b) => format!("Value::lit({})", rust_bytes(b)),
                 Part::Interp(i) => self.expr(&need(i.expr(), "interpolated expression")?)?,
             });
         }
@@ -566,7 +579,7 @@ impl Compiler {
             let ff = self.var("__findFile", 0)?;
             let np = self.lazy_var("__nixPath", 0)?;
             return Ok(format!(
-                "call(&call(&({ff}), {np})?, Value::str(&{}[..]))?",
+                "call(&call(&({ff}), {np})?, Value::lit({}))?",
                 rust_bytes(name.as_bytes())
             ));
         }
@@ -603,7 +616,7 @@ impl Compiler {
         for (n, p) in parts.iter().enumerate() {
             items.push(match p {
                 InterpolPart::Literal(t) if n == 0 => prefix(t.syntax().text(), false),
-                InterpolPart::Literal(t) => format!("Value::str(&{}[..])", rust_bytes(t.syntax().text().as_bytes())),
+                InterpolPart::Literal(t) => format!("Value::lit({})", rust_bytes(t.syntax().text().as_bytes())),
                 InterpolPart::Interpolation(i) => self.expr(&need(i.expr(), "interpolated expression")?)?,
             });
         }
@@ -627,7 +640,7 @@ impl Compiler {
     }
 
     fn select(&mut self, s: &ast::Select) -> Res<String> {
-        let base = self.expr(&need(s.expr(), "expression")?)?;
+        let base = self.operand(&need(s.expr(), "expression")?)?;
         let p = need(s.attrpath(), "attribute path")?;
         let attrs: Vec<ast::Attr> = p.attrs().collect();
         match s.default_expr() {
@@ -655,16 +668,16 @@ impl Compiler {
         let op = need(b.operator(), "operator")?;
         if op == PipeRight {
             let x = self.lazy(&lhs)?;
-            let f = self.expr(&rhs)?;
+            let f = self.operand(&rhs)?;
             return Ok(format!("call(&({f}), {x})?"));
         }
         if op == PipeLeft {
-            let f = self.expr(&lhs)?;
+            let f = self.operand(&lhs)?;
             let x = self.lazy(&rhs)?;
             return Ok(format!("call(&({f}), {x})?"));
         }
-        let l = self.expr(&lhs)?;
-        let r = self.expr(&rhs)?;
+        let l = self.operand(&lhs)?;
+        let r = self.operand(&rhs)?;
         Ok(match op {
             Concat => format!("concat_lists(&({l}), &({r}))?"),
             Update => format!("update(&({l}), &({r}))?"),
@@ -678,8 +691,10 @@ impl Compiler {
             Equal => format!("Value::Bool(eq(&({l}), &({r}))?)"),
             NotEqual => format!("Value::Bool(!eq(&({l}), &({r}))?)"),
             Less => format!("Value::Bool(less_than(&({l}), &({r}))?)"),
-            More => format!("{{ let r = {r}; Value::Bool(less_than(&r, &({l}))?) }}"),
-            LessOrEq => format!("{{ let r = {r}; Value::Bool(!less_than(&r, &({l}))?) }}"),
+            // The right operand is evaluated first, as Nix evaluates `a > b`
+            // as `b < a`.
+            More => format!("{{ let r = &({r}); Value::Bool(less_than(r, &({l}))?) }}"),
+            LessOrEq => format!("{{ let r = &({r}); Value::Bool(!less_than(r, &({l}))?) }}"),
             MoreOrEq => format!("Value::Bool(!less_than(&({l}), &({r}))?)"),
             PipeRight | PipeLeft => unreachable!(),
         })

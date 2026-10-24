@@ -113,15 +113,51 @@ predefined! {
     executable = "executable";
 }
 
+/// A fast hash for names, which come from the program and from the code it
+/// evaluates rather than from an adversary: eight bytes at a time, each
+/// mixed in with a rotation and a multiplication.
+#[derive(Default)]
+pub struct NameHasher(u64);
+
+impl std::hash::Hasher for NameHasher {
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        const K: u64 = 0xf135_7aea_2e62_a9c5;
+        let mut chunks = bytes.chunks_exact(8);
+        for c in &mut chunks {
+            let w = u64::from_le_bytes(c.try_into().unwrap());
+            self.0 = (self.0.rotate_left(5) ^ w).wrapping_mul(K);
+        }
+        let rest = chunks.remainder();
+        if !rest.is_empty() {
+            let mut buf = [0u8; 8];
+            buf[..rest.len()].copy_from_slice(rest);
+            self.0 = (self.0.rotate_left(5) ^ u64::from_le_bytes(buf)).wrapping_mul(K);
+        }
+    }
+
+    #[inline]
+    fn write_u8(&mut self, b: u8) {
+        self.0 = (self.0.rotate_left(5) ^ b as u64).wrapping_mul(0xf135_7aea_2e62_a9c5);
+    }
+
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
+type NameMap<V> = HashMap<Rc<str>, V, std::hash::BuildHasherDefault<NameHasher>>;
+
 struct Interner {
-    map: HashMap<Rc<str>, Sym>,
+    map: NameMap<Sym>,
     names: Vec<Rc<str>>,
 }
 
 impl Interner {
     fn new() -> Self {
         let mut i = Interner {
-            map: HashMap::new(),
+            map: NameMap::default(),
             names: Vec::new(),
         };
         for n in PREDEFINED {

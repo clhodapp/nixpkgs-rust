@@ -39,6 +39,6 @@ pub mod prelude {
     pub use crate::string::NixStr;
     pub use crate::symbol::Sym;
     pub use crate::value::{
-        CodeId, CrateTables, Formals, LambdaInfo, Pos, PosInfo, Value, call, force, run,
+        CodeId, CrateTables, Env, Formals, LambdaInfo, Pos, PosInfo, Value, call, force, run,
     };
 }

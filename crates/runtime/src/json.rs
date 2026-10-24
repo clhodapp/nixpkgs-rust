@@ -14,21 +14,32 @@ use crate::value::{Pos, Value, call, force};
 
 /// Writes a JSON string literal the way nlohmann::json escapes it.
 pub fn write_json_string(out: &mut String, s: &[u8]) {
-    out.push('"');
     let text = String::from_utf8_lossy(s);
-    for c in text.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\u{08}' => out.push_str("\\b"),
-            '\u{0c}' => out.push_str("\\f"),
-            c if (c as u32) < 0x20 => write!(out, "\\u{:04x}", c as u32).unwrap(),
-            c => out.push(c),
+    out.reserve(text.len() + 2);
+    out.push('"');
+    // Copy runs of characters that need no escape in one go; every
+    // character that does is ASCII, so byte offsets are character
+    // boundaries.
+    let b = text.as_bytes();
+    let mut start = 0;
+    for (i, &c) in b.iter().enumerate() {
+        if c >= 0x20 && c != b'"' && c != b'\\' {
+            continue;
         }
+        out.push_str(&text[start..i]);
+        match c {
+            b'"' => out.push_str("\\\""),
+            b'\\' => out.push_str("\\\\"),
+            b'\n' => out.push_str("\\n"),
+            b'\r' => out.push_str("\\r"),
+            b'\t' => out.push_str("\\t"),
+            0x08 => out.push_str("\\b"),
+            0x0c => out.push_str("\\f"),
+            c => write!(out, "\\u{:04x}", c).unwrap(),
+        }
+        start = i + 1;
     }
+    out.push_str(&text[start..]);
     out.push('"');
 }
 

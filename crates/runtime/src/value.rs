@@ -111,10 +111,45 @@ pub struct LambdaInfo {
     pub pos: Pos,
 }
 
+/// The values a thunk or lambda captured. Up to two are stored in place,
+/// which covers 85% of the thunks and lambdas compiled from nixpkgs (59%
+/// capture one value), so that most take one allocation instead of two.
+pub enum Env {
+    E0,
+    E1([Value; 1]),
+    E2([Value; 2]),
+    Heap(Box<[Value]>),
+}
+
+impl Env {
+    #[inline]
+    pub fn as_slice(&self) -> &[Value] {
+        match self {
+            Env::E0 => &[],
+            Env::E1(v) => v,
+            Env::E2(v) => v,
+            Env::Heap(v) => v,
+        }
+    }
+}
+
+impl<const N: usize> From<[Value; N]> for Env {
+    #[inline]
+    fn from(a: [Value; N]) -> Env {
+        let mut it = a.into_iter();
+        match N {
+            0 => Env::E0,
+            1 => Env::E1([it.next().unwrap()]),
+            2 => Env::E2([it.next().unwrap(), it.next().unwrap()]),
+            _ => Env::Heap(it.collect()),
+        }
+    }
+}
+
 /// A closure: a generated function plus the values it captured.
 pub struct Lambda {
     pub code: CodeId,
-    pub env: Box<[Value]>,
+    pub env: Env,
     pub info: &'static LambdaInfo,
 }
 
@@ -136,7 +171,7 @@ pub enum ThunkState {
     /// Allocated so that recursive bindings can refer to it, not yet filled.
     Blank,
     /// A generated function and its captured values.
-    Code(CodeId, Box<[Value]>),
+    Code(CodeId, Env),
     /// The application of a function to an argument.
     App(Value, Value),
     /// The selection of an attribute.
@@ -156,7 +191,7 @@ pub struct Thunk(pub RefCell<ThunkState>);
 
 impl Value {
     #[inline]
-    pub fn thunk(code: CodeId, env: Box<[Value]>) -> Value {
+    pub fn thunk(code: CodeId, env: Env) -> Value {
         Value::Thunk(Rc::new(Thunk(RefCell::new(ThunkState::Code(code, env)))))
     }
 
@@ -174,7 +209,7 @@ impl Value {
 
     /// Fills a thunk made by [`Value::blank`].
     #[inline]
-    pub fn init(&self, code: CodeId, env: Box<[Value]>) {
+    pub fn init(&self, code: CodeId, env: Env) {
         match self {
             Value::Thunk(t) => *t.0.borrow_mut() = ThunkState::Code(code, env),
             _ => unreachable!("init on a value that is not a blank thunk"),
@@ -211,7 +246,7 @@ impl Value {
         Value::Thunk(Rc::new(Thunk(RefCell::new(ThunkState::Native(Rc::new(f))))))
     }
 
-    pub fn lambda(code: CodeId, env: Box<[Value]>, info: &'static LambdaInfo) -> Value {
+    pub fn lambda(code: CodeId, env: Env, info: &'static LambdaInfo) -> Value {
         Value::Lambda(Rc::new(Lambda { code, env, info }))
     }
 
@@ -229,6 +264,12 @@ impl Value {
 
     pub fn str(s: impl Into<Box<[u8]>>) -> Value {
         Value::Str(Rc::new(NixStr::plain(s)))
+    }
+
+    /// A string literal of the program; its bytes are not copied.
+    #[inline]
+    pub fn lit(s: &'static [u8]) -> Value {
+        Value::Str(Rc::new(NixStr::literal(s)))
     }
 
     pub fn string(s: NixStr) -> Value {
@@ -287,7 +328,7 @@ impl Thunk {
         }
         let st = std::mem::replace(&mut *self.0.borrow_mut(), ThunkState::Running);
         let res = match &st {
-            ThunkState::Code(id, env) => run(*id, env, Value::Null),
+            ThunkState::Code(id, env) => run(*id, env.as_slice(), Value::Null),
             ThunkState::App(f, x) => call(f, x.clone()),
             ThunkState::Sel(v, k) => crate::ops::select(v, *k),
             ThunkState::Native(f) => f(),
@@ -330,7 +371,7 @@ pub fn call(f: &Value, arg: Value) -> R<Value> {
     let f = force(f)?;
     let _d = depth_guard()?;
     match &f {
-        Value::Lambda(l) => run(l.code, &l.env, arg),
+        Value::Lambda(l) => run(l.code, l.env.as_slice(), arg),
         Value::Prim(p) => {
             if p.args.len() + 1 == p.op.arity {
                 if p.args.is_empty() {

@@ -116,6 +116,9 @@ impl Attrs {
 
     /// `a // b`: the attributes of both, `b` winning on a clash.
     pub fn update(a: &Attrs, b: &Attrs) -> Attrs {
+        if b.e.len() * 8 < a.e.len() {
+            return Attrs::update_small(a, b);
+        }
         let mut e = Vec::with_capacity(a.e.len() + b.e.len());
         let (mut i, mut j) = (0, 0);
         while i < a.e.len() && j < b.e.len() {
@@ -137,11 +140,90 @@ impl Attrs {
         Attrs { e }
     }
 
+    /// `a // b` for a `b` much smaller than `a`: each entry of `b` is placed
+    /// by binary search, and the entries of `a` between them are copied as
+    /// runs instead of compared one by one.
+    fn update_small(a: &Attrs, b: &Attrs) -> Attrs {
+        let mut e = Vec::with_capacity(a.e.len() + b.e.len());
+        let mut cur = 0;
+        for y in &b.e {
+            let rest = &a.e[cur..];
+            match rest.binary_search_by_key(&y.k, |x| x.k) {
+                Ok(i) => {
+                    e.extend_from_slice(&rest[..i]);
+                    e.push(y.clone());
+                    cur += i + 1;
+                }
+                Err(i) => {
+                    e.extend_from_slice(&rest[..i]);
+                    e.push(y.clone());
+                    cur += i;
+                }
+            }
+        }
+        e.extend_from_slice(&a.e[cur..]);
+        Attrs { e }
+    }
+
     pub fn into_vec(self) -> Vec<Attr> {
         self.e
     }
 
     pub fn as_slice(&self) -> &[Attr] {
         &self.e
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn set(keys: &[u32], tag: i64) -> Attrs {
+        Attrs::from_sorted(
+            keys.iter()
+                .map(|&k| Attr {
+                    k: Sym(k),
+                    v: Value::Int(tag * 1000 + k as i64),
+                    pos: Pos::default(),
+                })
+                .collect(),
+        )
+    }
+
+    fn entries(a: &Attrs) -> Vec<(u32, i64)> {
+        a.iter()
+            .map(|x| match x.v {
+                Value::Int(i) => (x.k.0, i),
+                _ => unreachable!(),
+            })
+            .collect()
+    }
+
+    /// The general merge, which `update` uses when neither side is small.
+    fn merged(a: &Attrs, b: &Attrs) -> Vec<(u32, i64)> {
+        let mut m: std::collections::BTreeMap<u32, i64> = entries(a).into_iter().collect();
+        m.extend(entries(b));
+        m.into_iter().collect()
+    }
+
+    #[test]
+    fn small_update_matches_the_merge() {
+        // A pseudo-random walk over key sets, so both small and general
+        // updates see overlaps, gaps and keys before and after `a`.
+        let mut seed: u64 = 7;
+        let mut next = || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 33) as u32
+        };
+        for _ in 0..200 {
+            let mut ak: Vec<u32> = (0..(next() % 200)).map(|_| next() % 400).collect();
+            ak.sort();
+            ak.dedup();
+            let mut bk: Vec<u32> = (0..(next() % 12)).map(|_| next() % 420).collect();
+            bk.sort();
+            bk.dedup();
+            let (a, b) = (set(&ak, 1), set(&bk, 2));
+            assert_eq!(entries(&Attrs::update(&a, &b)), merged(&a, &b));
+        }
     }
 }
