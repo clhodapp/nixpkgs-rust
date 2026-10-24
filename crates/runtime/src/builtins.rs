@@ -189,7 +189,13 @@ fn p_remove_attrs(a: &[Value]) -> R<Value> {
 fn p_intersect_attrs(a: &[Value]) -> R<Value> {
     let x = force_attrs(&a[0])?;
     let y = force_attrs(&a[1])?;
-    let e: Vec<Attr> = y.iter().filter(|at| x.contains(at.k)).cloned().collect();
+    // Walk the smaller set: callPackage intersects a few formals with all
+    // of nixpkgs. Both orders yield the entries sorted by symbol.
+    let e: Vec<Attr> = if x.len() < y.len() {
+        x.iter().filter_map(|at| y.get_attr(at.k).cloned()).collect()
+    } else {
+        y.iter().filter(|at| x.contains(at.k)).cloned().collect()
+    };
     Ok(Value::attrs(Attrs::from_sorted(e)))
 }
 

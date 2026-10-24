@@ -73,7 +73,10 @@ debug = false
 codegen-units = 16
 incremental = false
 
-[profile.release.package.nixpkgs-rust-runtime]
+# Every package outside this workspace: the runtime and its dependencies
+# (hashing, regular expressions), where evaluation spends much of its time.
+# Naming only the runtime would leave its dependencies unoptimised.
+[profile.release.package."*"]
 opt-level = 3
 codegen-units = 16
 "#,
