@@ -174,7 +174,7 @@ fn show_rec(out: &mut String, v: &Value, depth: usize) {
         return;
     }
     match v {
-        Value::Thunk(t) => match &*t.0.borrow() {
+        Value::Thunk(t) => match &*t.state.borrow() {
             crate::value::ThunkState::Done(x) => show_rec(out, x, depth),
             _ => out.push_str("«thunk»"),
         },

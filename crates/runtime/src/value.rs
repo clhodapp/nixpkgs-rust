@@ -178,27 +178,43 @@ pub enum ThunkState {
     Sel(Value, Sym),
     /// A runtime closure.
     Native(Rc<dyn Fn() -> R<Value>>),
-    /// Being forced.
-    Running,
     /// Forced; the value is in weak head normal form.
     Done(Value),
 }
 
 /// A suspended computation that runs at most once to completion. When it
-/// fails, it goes back to its unforced state, so forcing it again repeats the
-/// failure (which is what `builtins.tryEval` relies on).
-pub struct Thunk(pub RefCell<ThunkState>);
+/// fails, it stays unforced, so forcing it again repeats the failure (which
+/// is what `builtins.tryEval` relies on).
+///
+/// Forcing reads the state in place and replaces it only with the result:
+/// moving the state out and back would copy it twice per force. `running`
+/// marks a thunk being forced, which is how a thunk that needs its own value
+/// is detected.
+pub struct Thunk {
+    pub state: RefCell<ThunkState>,
+    running: std::cell::Cell<bool>,
+}
+
+impl Thunk {
+    #[inline]
+    pub fn new(state: ThunkState) -> Thunk {
+        Thunk {
+            state: RefCell::new(state),
+            running: std::cell::Cell::new(false),
+        }
+    }
+}
 
 impl Value {
     #[inline]
     pub fn thunk(code: CodeId, env: Env) -> Value {
-        Value::Thunk(Rc::new(Thunk(RefCell::new(ThunkState::Code(code, env)))))
+        Value::Thunk(Rc::new(Thunk::new(ThunkState::Code(code, env))))
     }
 
     /// A thunk to be filled with [`Value::init`].
     #[inline]
     pub fn blank() -> Value {
-        Value::Thunk(Rc::new(Thunk(RefCell::new(ThunkState::Blank))))
+        Value::Thunk(Rc::new(Thunk::new(ThunkState::Blank)))
     }
 
     /// `n` thunks to be filled with [`Value::init`], for the bindings of a
@@ -211,7 +227,7 @@ impl Value {
     #[inline]
     pub fn init(&self, code: CodeId, env: Env) {
         match self {
-            Value::Thunk(t) => *t.0.borrow_mut() = ThunkState::Code(code, env),
+            Value::Thunk(t) => *t.state.borrow_mut() = ThunkState::Code(code, env),
             _ => unreachable!("init on a value that is not a blank thunk"),
         }
     }
@@ -220,7 +236,7 @@ impl Value {
     pub fn init_value(&self, v: Value) {
         match self {
             Value::Thunk(t) => {
-                *t.0.borrow_mut() = match v {
+                *t.state.borrow_mut() = match v {
                     Value::Thunk(_) => ThunkState::App(Value::Prim(Rc::new(PrimApp { op: &ID, args: vec![] })), v),
                     v => ThunkState::Done(v),
                 }
@@ -232,18 +248,18 @@ impl Value {
     /// The lazy application `f x`.
     #[inline]
     pub fn app(f: Value, x: Value) -> Value {
-        Value::Thunk(Rc::new(Thunk(RefCell::new(ThunkState::App(f, x)))))
+        Value::Thunk(Rc::new(Thunk::new(ThunkState::App(f, x))))
     }
 
     /// The lazy selection `v.k`.
     #[inline]
     pub fn sel(v: Value, k: Sym) -> Value {
-        Value::Thunk(Rc::new(Thunk(RefCell::new(ThunkState::Sel(v, k)))))
+        Value::Thunk(Rc::new(Thunk::new(ThunkState::Sel(v, k))))
     }
 
     /// A lazy value computed by a runtime closure.
     pub fn native(f: impl Fn() -> R<Value> + 'static) -> Value {
-        Value::Thunk(Rc::new(Thunk(RefCell::new(ThunkState::Native(Rc::new(f))))))
+        Value::Thunk(Rc::new(Thunk::new(ThunkState::Native(Rc::new(f)))))
     }
 
     pub fn lambda(code: CodeId, env: Env, info: &'static LambdaInfo) -> Value {
@@ -323,37 +339,38 @@ static ID: PrimOp = PrimOp {
 
 impl Thunk {
     fn force(&self) -> R<Value> {
-        if let ThunkState::Done(v) = &*self.0.borrow() {
-            return Ok(v.clone());
+        if self.running.get() {
+            return Err(Error::new(Kind::InfiniteRecursion, "infinite recursion encountered"));
         }
-        let st = std::mem::replace(&mut *self.0.borrow_mut(), ThunkState::Running);
-        let res = match &st {
-            ThunkState::Code(id, env) => run(*id, env.as_slice(), Value::Null),
-            ThunkState::App(f, x) => call(f, x.clone()),
-            ThunkState::Sel(v, k) => crate::ops::select(v, *k),
-            ThunkState::Native(f) => f(),
-            ThunkState::Running => {
-                *self.0.borrow_mut() = ThunkState::Running;
-                return Err(Error::new(Kind::InfiniteRecursion, "infinite recursion encountered"));
+        let res = {
+            // The state stays borrowed while it is evaluated. Nothing writes
+            // to a thunk that is not blank except this function, and a
+            // nested force of this thunk stops at `running` above.
+            let st = self.state.borrow();
+            if let ThunkState::Done(v) = &*st {
+                return Ok(v.clone());
             }
-            ThunkState::Blank => unreachable!("forced a blank thunk"),
-            ThunkState::Done(_) => unreachable!(),
+            self.running.set(true);
+            let res = match &*st {
+                ThunkState::Code(id, env) => run(*id, env.as_slice(), Value::Null),
+                ThunkState::App(f, x) => call(f, x.clone()),
+                ThunkState::Sel(v, k) => crate::ops::select(v, *k),
+                ThunkState::Native(f) => f(),
+                ThunkState::Blank => unreachable!("forced a blank thunk"),
+                ThunkState::Done(_) => unreachable!(),
+            };
+            res.and_then(|v| force(&v))
         };
-        match res.and_then(|v| force(&v)) {
-            Ok(v) => {
-                *self.0.borrow_mut() = ThunkState::Done(v.clone());
-                Ok(v)
-            }
-            Err(e) => {
-                *self.0.borrow_mut() = st;
-                Err(e)
-            }
+        self.running.set(false);
+        if let Ok(v) = &res {
+            *self.state.borrow_mut() = ThunkState::Done(v.clone());
         }
+        res
     }
 
     /// Whether the thunk has been forced successfully.
     pub fn is_done(&self) -> bool {
-        matches!(&*self.0.borrow(), ThunkState::Done(_))
+        matches!(&*self.state.borrow(), ThunkState::Done(_))
     }
 }
 
