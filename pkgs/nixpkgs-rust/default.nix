@@ -9,6 +9,8 @@
   lib,
   path,
   buildNixProgram,
+  # The optimisation level of the generated code; see build-program.nix.
+  optLevel ? 0,
 }:
 let
   # Interpolating `path` would copy the tree to a new store path named after
@@ -23,7 +25,7 @@ let
 in
 buildNixProgram {
   pname = "nixpkgs-rust";
-  inherit root;
+  inherit root optLevel;
   # The nixpkgs tree that was compiled, as a store path string, for
   # comparisons with Nix. Interpolating it does not copy the tree again.
   passthru.nixpkgsPath = root;
