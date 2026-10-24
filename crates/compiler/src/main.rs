@@ -35,6 +35,8 @@ struct Args {
     /// Files outside the root that `<NAME>` search path lookups find, such
     /// as Nix's own `nix/fetchurl.nix`, as (NAME, file).
     extra: Vec<(String, String)>,
+    /// The optimisation level of the generated crates in release builds.
+    opt_level: u8,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -46,6 +48,7 @@ fn parse_args() -> Result<Args, String> {
     let mut budget = 2_000_000;
     let mut also_ext = Vec::new();
     let mut extra = Vec::new();
+    let mut opt_level = 0u8;
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         let mut val = || it.next().ok_or_else(|| format!("option '{a}' needs an argument"));
@@ -57,6 +60,11 @@ fn parse_args() -> Result<Args, String> {
             "--bin-name" => bin_name = val()?,
             "--budget" => budget = val()?.parse().map_err(|_| "--budget needs a number".to_string())?,
             "--also-ext" => also_ext.push(val()?),
+            "--opt-level" => {
+                opt_level = val()?
+                    .parse()
+                    .map_err(|_| "--opt-level needs a number from 0 to 3".to_string())?
+            }
             "--extra" => {
                 let v = val()?;
                 let (n, p) = v
@@ -76,6 +84,7 @@ fn parse_args() -> Result<Args, String> {
         budget,
         also_ext,
         extra,
+        opt_level,
     })
 }
 
@@ -205,6 +214,7 @@ fn run(a: Args) -> Result<(), String> {
             runtime: &a.runtime,
             root: &root_s,
             bin_name: &a.bin_name,
+            opt_level: a.opt_level,
         },
     )
     .map_err(|e| format!("cannot write '{}': {e}", a.out.display()))?;

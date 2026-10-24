@@ -28,6 +28,8 @@ pub struct EmitOpts<'a> {
     /// The root directory the program reads its files from by default.
     pub root: &'a str,
     pub bin_name: &'a str,
+    /// The optimisation level of the generated crates in release builds.
+    pub opt_level: u8,
 }
 
 fn write_if_changed(path: &Path, contents: &str) -> std::io::Result<()> {
@@ -62,13 +64,13 @@ opt-level = 0
 debug = false
 incremental = false
 
-[profile.dev.package.nixpkgs-rust-runtime]
+[profile.dev.package."*"]
 opt-level = 2
 
-# The generated crates are many and large, so optimising them would multiply
-# the build time; the time evaluation spends is mostly in the runtime.
+# The generated crates are many and large: optimising them multiplies the
+# build time (about seven times at opt-level 2) and its memory by half again.
 [profile.release]
-opt-level = 0
+opt-level = {}
 debug = false
 codegen-units = 16
 incremental = false
@@ -80,7 +82,8 @@ incremental = false
 opt-level = 3
 codegen-units = 16
 "#,
-        members.join(", ")
+        members.join(", "),
+        o.opt_level
     );
     write_if_changed(&o.out.join("Cargo.toml"), &workspace)?;
 
