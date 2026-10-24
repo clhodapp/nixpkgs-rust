@@ -38,7 +38,27 @@ pub mod prelude {
     pub use crate::program::{path_lit, path_prefix};
     pub use crate::string::NixStr;
     pub use crate::symbol::Sym;
-    pub use crate::value::{
-        CodeId, CrateTables, Env, Formals, LambdaInfo, Pos, PosInfo, Value, call, force, run,
-    };
+    pub use crate::value::{CodeId, CrateTables, Env, Formals, LambdaInfo, Pos, PosInfo, Value, call};
+    use crate::value::{CodeId as Id, Value as V};
+
+    // Generated crates are compiled without optimisation, and a function
+    // marked `#[inline]` in the runtime is compiled again inside each crate
+    // that calls it, at that crate's level. These definitions take
+    // precedence over the inline runtime functions of the same names, so
+    // generated code calls the runtime's optimised copies.
+
+    #[inline(never)]
+    pub fn truthy(v: &V) -> R<bool> {
+        crate::ops::truthy(v)
+    }
+
+    #[inline(never)]
+    pub fn force(v: &V) -> R<V> {
+        crate::value::force(v)
+    }
+
+    #[inline(never)]
+    pub fn run(id: Id, env: &[V], arg: V) -> R<V> {
+        crate::value::run(id, env, arg)
+    }
 }

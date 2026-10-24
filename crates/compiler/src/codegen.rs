@@ -75,6 +75,44 @@ struct Binding {
     local: String,
 }
 
+/// The captured values of a unit, as Rust expressions, and the calls that
+/// store them in a thunk or a lambda. Each number of captures has its own
+/// runtime constructor, which builds the environment in the runtime: the
+/// generated crates are compiled without optimisation, and moving an
+/// environment through them would copy it with a `memcpy` call each time.
+struct Captures(Vec<String>);
+
+impl Captures {
+    fn new(caps: Vec<String>) -> Captures {
+        Captures(caps)
+    }
+
+    /// The constructor suffix and the arguments that follow the leading ones.
+    fn parts(&self) -> (&'static str, String) {
+        match self.0.len() {
+            0 => ("0", String::new()),
+            1 => ("1", format!(", {}", self.0[0])),
+            2 => ("2", format!(", {}, {}", self.0[0], self.0[1])),
+            _ => ("n", format!(", vec![{}]", self.0.join(", "))),
+        }
+    }
+
+    fn thunk(&self, id: &str) -> String {
+        let (n, args) = self.parts();
+        format!("Value::thunk{n}({id}{args})")
+    }
+
+    fn lambda(&self, id: &str, info: &str) -> String {
+        let (n, args) = self.parts();
+        format!("Value::lambda{n}({id}, &{info}{args})")
+    }
+
+    fn init(&self, place: &str, id: &str) -> String {
+        let (n, args) = self.parts();
+        format!("{place}.init{n}({id}{args});")
+    }
+}
+
 struct Unit {
     id: u32,
     caps: Vec<u32>,
@@ -278,13 +316,13 @@ impl Compiler {
     }
 
     /// Generates a unit and returns its code id and its captured values as
-    /// the boxed slice a thunk or lambda takes.
-    fn unit<F>(&mut self, f: F) -> Res<(String, String)>
+    /// the arguments of the runtime constructor that stores them.
+    fn unit<F>(&mut self, f: F) -> Res<(String, Captures)>
     where
         F: FnOnce(&mut Self) -> Res<String>,
     {
         let (id, caps) = self.unit_caps(f)?;
-        Ok((id, format!("Env::from([{}])", caps.join(", "))))
+        Ok((id, Captures::new(caps)))
     }
 
     /// Generates a unit that runs where it is created rather than lazily,
@@ -365,7 +403,7 @@ impl Compiler {
             Some(Resolved::With(_)) => {
                 let n = name.to_string();
                 let (id, env) = self.unit(move |c| c.var(&n, skip))?;
-                Ok(format!("Value::thunk({id}, {env})"))
+                Ok(env.thunk(&id))
             }
             _ => self.var(name, skip),
         }
@@ -429,7 +467,7 @@ impl Compiler {
         }
         let e = e.clone();
         let (id, env) = self.unit(move |c| c.expr(&e))?;
-        Ok(format!("Value::thunk({id}, {env})"))
+        Ok(env.thunk(&id))
     }
 
     // -----------------------------------------------------------------------
@@ -834,7 +872,7 @@ impl Compiler {
         let creator_name = format!("M{}", &info_name[1..]);
         let creator_info = info.replacen(&format!("static {info_name}:"), &format!("static {creator_name}:"), 1);
         self.units.last_mut().unwrap().pre.push_str(&creator_info);
-        Ok(format!("Value::lambda({id}, {env}, &{creator_name})"))
+        Ok(env.lambda(&id, &creator_name))
     }
 
     /// Fills a blank thunk with an expression.
@@ -845,7 +883,7 @@ impl Compiler {
         }
         let e = e.clone();
         let (id, env) = self.unit(move |c| c.expr(&e))?;
-        Ok(format!("{local}.init({id}, {env});"))
+        Ok(env.init(local, &id))
     }
 
     // -----------------------------------------------------------------------
@@ -1047,7 +1085,7 @@ impl Compiler {
         }
         let s = s.clone();
         let (id, env) = self.unit(move |c| c.any_set(s))?;
-        Ok(format!("Value::thunk({id}, {env})"))
+        Ok(env.thunk(&id))
     }
 
     /// A set node, recursive or not.
@@ -1286,7 +1324,7 @@ impl Compiler {
                 if s.has_dynamic() {
                     let s = (**s).clone();
                     let (id, env) = self.unit(move |c| c.any_set(s))?;
-                    format!("{place}.init({id}, {env});")
+                    env.init(&place, &id)
                 } else {
                     format!("{place}.init_value({});", self.any_set((**s).clone())?)
                 }

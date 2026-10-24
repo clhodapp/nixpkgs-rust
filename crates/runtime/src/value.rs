@@ -133,19 +133,6 @@ impl Env {
     }
 }
 
-impl<const N: usize> From<[Value; N]> for Env {
-    #[inline]
-    fn from(a: [Value; N]) -> Env {
-        let mut it = a.into_iter();
-        match N {
-            0 => Env::E0,
-            1 => Env::E1([it.next().unwrap()]),
-            2 => Env::E2([it.next().unwrap(), it.next().unwrap()]),
-            _ => Env::Heap(it.collect()),
-        }
-    }
-}
-
 /// A closure: a generated function plus the values it captured.
 pub struct Lambda {
     pub code: CodeId,
@@ -211,8 +198,9 @@ impl Value {
         Value::Thunk(Rc::new(Thunk::new(ThunkState::Code(code, env))))
     }
 
-    /// A thunk to be filled with [`Value::init`].
-    #[inline]
+    /// A thunk to be filled with [`Value::init`]. Generated code calls this,
+    /// so it is kept out of line like [`Value::thunk1`].
+    #[inline(never)]
     pub fn blank() -> Value {
         Value::Thunk(Rc::new(Thunk::new(ThunkState::Blank)))
     }
@@ -221,6 +209,71 @@ impl Value {
     /// large `let` or recursive set.
     pub fn blanks(n: usize) -> Vec<Value> {
         (0..n).map(|_| Value::blank()).collect()
+    }
+
+    // The constructors below are what generated code calls. Generated crates
+    // are compiled without optimisation, so these are kept out of line: they
+    // build the environment here, compiled with optimisation, rather than
+    // in the caller, where every move of it would be a `memcpy` call.
+
+    #[inline(never)]
+    pub fn thunk0(code: CodeId) -> Value {
+        Value::thunk(code, Env::E0)
+    }
+
+    #[inline(never)]
+    pub fn thunk1(code: CodeId, a: Value) -> Value {
+        Value::thunk(code, Env::E1([a]))
+    }
+
+    #[inline(never)]
+    pub fn thunk2(code: CodeId, a: Value, b: Value) -> Value {
+        Value::thunk(code, Env::E2([a, b]))
+    }
+
+    #[inline(never)]
+    pub fn thunkn(code: CodeId, caps: Vec<Value>) -> Value {
+        Value::thunk(code, Env::Heap(caps.into_boxed_slice()))
+    }
+
+    #[inline(never)]
+    pub fn lambda0(code: CodeId, info: &'static LambdaInfo) -> Value {
+        Value::lambda(code, Env::E0, info)
+    }
+
+    #[inline(never)]
+    pub fn lambda1(code: CodeId, info: &'static LambdaInfo, a: Value) -> Value {
+        Value::lambda(code, Env::E1([a]), info)
+    }
+
+    #[inline(never)]
+    pub fn lambda2(code: CodeId, info: &'static LambdaInfo, a: Value, b: Value) -> Value {
+        Value::lambda(code, Env::E2([a, b]), info)
+    }
+
+    #[inline(never)]
+    pub fn lambdan(code: CodeId, info: &'static LambdaInfo, caps: Vec<Value>) -> Value {
+        Value::lambda(code, Env::Heap(caps.into_boxed_slice()), info)
+    }
+
+    #[inline(never)]
+    pub fn init0(&self, code: CodeId) {
+        self.init(code, Env::E0)
+    }
+
+    #[inline(never)]
+    pub fn init1(&self, code: CodeId, a: Value) {
+        self.init(code, Env::E1([a]))
+    }
+
+    #[inline(never)]
+    pub fn init2(&self, code: CodeId, a: Value, b: Value) {
+        self.init(code, Env::E2([a, b]))
+    }
+
+    #[inline(never)]
+    pub fn initn(&self, code: CodeId, caps: Vec<Value>) {
+        self.init(code, Env::Heap(caps.into_boxed_slice()))
     }
 
     /// Fills a thunk made by [`Value::blank`].
@@ -245,14 +298,15 @@ impl Value {
         }
     }
 
-    /// The lazy application `f x`.
-    #[inline]
+    /// The lazy application `f x`. Generated code calls this, so it is kept
+    /// out of line like [`Value::thunk1`].
+    #[inline(never)]
     pub fn app(f: Value, x: Value) -> Value {
         Value::Thunk(Rc::new(Thunk::new(ThunkState::App(f, x))))
     }
 
-    /// The lazy selection `v.k`.
-    #[inline]
+    /// The lazy selection `v.k`, kept out of line like [`Value::app`].
+    #[inline(never)]
     pub fn sel(v: Value, k: Sym) -> Value {
         Value::Thunk(Rc::new(Thunk::new(ThunkState::Sel(v, k))))
     }
@@ -282,8 +336,9 @@ impl Value {
         Value::Str(Rc::new(NixStr::plain(s)))
     }
 
-    /// A string literal of the program; its bytes are not copied.
-    #[inline]
+    /// A string literal of the program; its bytes are not copied. Kept out
+    /// of line for the same reason as [`Value::thunk1`].
+    #[inline(never)]
     pub fn lit(s: &'static [u8]) -> Value {
         Value::Str(Rc::new(NixStr::literal(s)))
     }
