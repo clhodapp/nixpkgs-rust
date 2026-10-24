@@ -1,0 +1,9 @@
+[package]
+name = "nixpkgs-rust-compiler"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+nixpkgs-rust-runtime = { version = "0.1.0", path = "../runtime" }
+rnix = "0.15.0"
+rowan = "0.17.0"

@@ -1,0 +1,6 @@
+[workspace]
+resolver = "2"
+members = ["crates/runtime", "crates/compiler"]
+
+[profile.release]
+debug = "line-tables-only"
