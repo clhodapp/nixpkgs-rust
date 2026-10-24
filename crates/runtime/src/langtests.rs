@@ -134,7 +134,14 @@ pub fn run(p: &'static Program, root: &str) -> i32 {
         .map(|n| n.trim_end_matches(".nix").to_string())
         .collect();
     names.sort();
-    let (mut pass, mut fail, mut skip) = (0, 0, 0);
+    // Tests known to fail, named in LANG_TESTS_KNOWN_FAILURES, are reported
+    // but do not fail the run.
+    let known: Vec<String> = std::env::var("LANG_TESTS_KNOWN_FAILURES")
+        .unwrap_or_default()
+        .split_whitespace()
+        .map(String::from)
+        .collect();
+    let (mut pass, mut fail, mut skip, mut known_fail) = (0, 0, 0, 0);
     for name in names {
         if let Some(o) = &only
             && !name.contains(o.as_str())
@@ -154,12 +161,16 @@ pub fn run(p: &'static Program, root: &str) -> i32 {
                 skip += 1;
                 println!("SKIP {name}: {why}");
             }
+            Outcome::Fail(why) if known.contains(&name) => {
+                known_fail += 1;
+                println!("KNOWN FAIL {name}\n{why}\n");
+            }
             Outcome::Fail(why) => {
                 fail += 1;
                 println!("FAIL {name}\n{why}\n");
             }
         }
     }
-    println!("{pass} passed, {fail} failed, {skip} skipped");
+    println!("{pass} passed, {fail} failed, {known_fail} known failures, {skip} skipped");
     if fail == 0 { 0 } else { 1 }
 }

@@ -89,9 +89,19 @@
                     alsoExt = [ "exp" ];
                   };
                 in
-                pkgs.runCommand "nixpkgs-rust-lang-tests" { } ''
-                  ${program}/bin/lang lang-tests | tee $out
-                '';
+                pkgs.runCommand "nixpkgs-rust-lang-tests"
+                  {
+                    # Features compiled programs do not have; see
+                    # docs/development/product.md § Bounds.
+                    LANG_TESTS_KNOWN_FAILURES = lib.concatStringsSep " " [
+                      "eval-okay-flake-ref-to-string"
+                      "eval-okay-parse-flake-ref"
+                      "eval-okay-import"
+                    ];
+                  }
+                  ''
+                    ${program}/bin/lang lang-tests | tee $out
+                  '';
 
               # The derivations the compiled nixpkgs instantiates are the
               # derivations Nix instantiates from the same nixpkgs.
