@@ -24,8 +24,9 @@ in
 buildNixProgram {
   pname = "nixpkgs-rust";
   inherit root;
-  # The nixpkgs tree that was compiled, for comparisons with Nix.
-  passthru.nixpkgsPath = path;
+  # The nixpkgs tree that was compiled, as a store path string, for
+  # comparisons with Nix. Interpolating it does not copy the tree again.
+  passthru.nixpkgsPath = root;
   meta = {
     description = "nixpkgs compiled to Rust: evaluates, builds and installs its packages";
     mainProgram = "nixpkgs-rust";

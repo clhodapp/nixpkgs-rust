@@ -1099,7 +1099,8 @@ fn add_path(path: &str, name: &str, filter: Option<Value>, method: Method, expec
     let resolved = store::resolve_ancestors(path);
     let mut call_filter = |p: &str, t: &str| -> R<bool> {
         match &filter {
-            Some(f) => truthy(&call_n(f, &[Value::Path(Rc::from(p)), str_val(t)])?),
+            // Nix passes the filter the path as a string, not a path value.
+            Some(f) => truthy(&call_n(f, &[str_val(p), str_val(t)])?),
             None => Ok(true),
         }
     };

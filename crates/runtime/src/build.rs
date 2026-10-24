@@ -118,7 +118,8 @@ fn upload_source(d: &mut crate::daemon::Daemon, path: &str) -> R<()> {
             _ => {
                 let mut f = |p: &str, t: &str| -> R<bool> {
                     match &filter {
-                        Some(f) => truthy(&call_n(f, &[Value::Path(Rc::from(p)), Value::str(t.as_bytes())])?),
+                        // As when evaluation hashed the source: the path as a string.
+                        Some(f) => truthy(&call_n(f, &[Value::str(p.as_bytes()), Value::str(t.as_bytes())])?),
                         None => Ok(true),
                     }
                 };

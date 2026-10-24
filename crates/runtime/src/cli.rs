@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! <program> eval [FILE] [-A ATTRPATH] [--arg NAME VALUE] [--argstr NAME STRING] [--json|--xml]
-//! <program> instantiate [FILE] -A ATTRPATH [...]
+//! <program> instantiate [FILE] -A ATTRPATH [--dump-drvs DIR] [...]
 //! <program> build [FILE] -A ATTRPATH [-o LINK | --no-link] [-v] [...]
 //! <program> install|remove [FILE] -A ATTRPATH... [--profile PROFILE] [-v] [...]
 //! <program> list [--profile PROFILE]
@@ -41,6 +41,23 @@ pub struct EvalOpts {
     pub attrs: Vec<String>,
     /// For `install`, `remove` and `list`: the profile.
     pub profile: Option<String>,
+    /// For `instantiate`: a directory to write the text of every derivation
+    /// the evaluation created into, without touching the store.
+    pub dump_drvs: Option<String>,
+}
+
+/// Writes the derivations the evaluation created into `dir`, each under the
+/// file name of its store path.
+fn dump_drvs(dir: &str) -> R<usize> {
+    std::fs::create_dir_all(dir).map_err(|e| Error::eval(format!("{dir}: {e}")))?;
+    let drvs: Vec<(String, Rc<crate::derivation::Derivation>)> = crate::store::STATE
+        .with(|s| s.borrow().drvs.iter().map(|(k, v)| (k.clone(), v.clone())).collect());
+    for (path, drv) in &drvs {
+        let name = path.rsplit('/').next().unwrap_or(path);
+        let file = std::path::Path::new(dir).join(name);
+        std::fs::write(&file, drv.unparse(false, None)).map_err(|e| Error::eval(format!("{}: {e}", file.display())))?;
+    }
+    Ok(drvs.len())
 }
 
 #[derive(Clone, Copy, Default, PartialEq)]
@@ -73,6 +90,7 @@ fn parse_opts(args: &[String]) -> Result<EvalOpts, String> {
                 o.attr = Some(v);
             }
             "-p" | "--profile" => o.profile = Some(next()?),
+            "--dump-drvs" => o.dump_drvs = Some(next()?),
             "--arg" => {
                 let n = next()?;
                 let v = next()?;
@@ -281,12 +299,21 @@ pub fn main(p: &'static Program, default_root: &'static str) {
             }
         },
         Some("instantiate") => match parse_opts(&args[1..]) {
-            Ok(o) => on_eval_thread(p, root, move || match eval_opts(&o).and_then(|v| drv_path_of(&v)) {
-                Ok(s) => {
-                    println!("{s}");
-                    0
+            Ok(o) => on_eval_thread(p, root, move || {
+                let res = eval_opts(&o).and_then(|v| drv_path_of(&v)).and_then(|s| {
+                    if let Some(dir) = &o.dump_drvs {
+                        let n = dump_drvs(dir)?;
+                        eprintln!("wrote {n} derivations to {dir}");
+                    }
+                    Ok(s)
+                });
+                match res {
+                    Ok(s) => {
+                        println!("{s}");
+                        0
+                    }
+                    Err(e) => report(&e),
                 }
-                Err(e) => report(&e),
             }),
             Err(e) => {
                 eprintln!("error: {e}");

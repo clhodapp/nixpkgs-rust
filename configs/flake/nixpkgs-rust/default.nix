@@ -105,18 +105,38 @@
 
               # The derivations the compiled nixpkgs instantiates are the
               # derivations Nix instantiates from the same nixpkgs.
-              drv-parity = pkgs.runCommand "nixpkgs-rust-drv-parity" { } (
-                lib.concatMapStrings (a: ''
-                  got=$(${packages.nixpkgs-rust}/bin/nixpkgs-rust instantiate -A ${a} \
-                    --arg config '{}' --arg overlays '[]')
-                  want=${builtins.unsafeDiscardOutputDependency reference.${a}.drvPath}
-                  if [ "$got" != "$want" ]; then
-                    echo "${a}: got $got, want $want" >&2
-                    exit 1
-                  fi
-                  echo "${a}: $got" >> $out
-                '') parityAttrs
-              );
+              # A NixOS system takes sources through filters (lib.cleanSource
+              # and the like), which packages such as hello do not.
+              drv-parity =
+                let
+                  nixpkgsPath = scope.nixpkgs-rust.passthru.nixpkgsPath;
+                  cdModule = "${nixpkgsPath}/nixos/modules/installer/cd-dvd/installation-cd-minimal.nix";
+                  # The configuration is passed to both sides as the value of
+                  # `import <module>`: clone-config.nix records the modules a
+                  # system was built from, so passing a path to one side and
+                  # a value to the other would give different systems.
+                  nixos = import "${nixpkgsPath}/nixos" {
+                    inherit system;
+                    configuration = import cdModule;
+                  };
+                  compare = name: command: want: ''
+                    got=$(${packages.nixpkgs-rust}/bin/nixpkgs-rust ${command})
+                    want=${builtins.unsafeDiscardOutputDependency want}
+                    if [ "$got" != "$want" ]; then
+                      echo "${name}: got $got, want $want" >&2
+                      exit 1
+                    fi
+                    echo "${name}: $got" >> $out
+                  '';
+                in
+                pkgs.runCommand "nixpkgs-rust-drv-parity" { } (
+                  lib.concatMapStrings (
+                    a: compare a "instantiate -A ${a} --arg config '{}' --arg overlays '[]'" reference.${a}.drvPath
+                  ) parityAttrs
+                  + compare "nixos-installation-cd-minimal"
+                    "instantiate nixos/default.nix -A system --arg configuration 'import ${cdModule}'"
+                    nixos.system.drvPath
+                );
             };
             treefmt.programs.nixfmt.enable = true;
           };
