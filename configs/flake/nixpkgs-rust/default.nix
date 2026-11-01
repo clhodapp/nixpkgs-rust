@@ -36,7 +36,7 @@
   partitionedAttrs.formatter = "formatter";
 
   partitions.formatter = {
-    extraInputs = (lib.caisson.pins.flake-compat ../../../tests/dependencies).sources;
+    extraInputs = (lib.caisson.pins.flake-compat ../../../tests/dependencies).dependencies;
     module =
       { inputs, ... }:
       {
@@ -46,7 +46,7 @@
   };
 
   partitions.checks = {
-    extraInputs = (lib.caisson.pins.flake-compat ../../../tests/dependencies).sources;
+    extraInputs = (lib.caisson.pins.flake-compat ../../../tests/dependencies).dependencies;
     module =
       { inputs, self, ... }:
       {
