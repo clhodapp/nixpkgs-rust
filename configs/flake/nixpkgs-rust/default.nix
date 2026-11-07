@@ -133,9 +133,10 @@
                   lib.concatMapStrings (
                     a: compare a "instantiate -A ${a} --arg config '{}' --arg overlays '[]'" reference.${a}.drvPath
                   ) parityAttrs
-                  + compare "nixos-installation-cd-minimal"
-                    "instantiate nixos/default.nix -A system --arg configuration 'import ${cdModule}'"
-                    nixos.system.drvPath
+                  +
+                    compare "nixos-installation-cd-minimal"
+                      "instantiate nixos/default.nix -A system --arg configuration 'import ${cdModule}'"
+                      nixos.system.drvPath
                 );
             };
             treefmt.programs.nixfmt.enable = true;
