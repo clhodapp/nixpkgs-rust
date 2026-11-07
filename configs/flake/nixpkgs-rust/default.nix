@@ -36,7 +36,7 @@
   partitionedAttrs.formatter = "formatter";
 
   partitions.formatter = {
-    extraInputs = (lib.caisson.pins.flake-compat ../../../tests/dependencies).sources;
+    extraInputs = (lib.caisson.pins.flake-compat ../../../tests/dependencies).dependencies;
     module =
       { inputs, ... }:
       {
@@ -46,7 +46,7 @@
   };
 
   partitions.checks = {
-    extraInputs = (lib.caisson.pins.flake-compat ../../../tests/dependencies).sources;
+    extraInputs = (lib.caisson.pins.flake-compat ../../../tests/dependencies).dependencies;
     module =
       { inputs, self, ... }:
       {
@@ -133,9 +133,10 @@
                   lib.concatMapStrings (
                     a: compare a "instantiate -A ${a} --arg config '{}' --arg overlays '[]'" reference.${a}.drvPath
                   ) parityAttrs
-                  + compare "nixos-installation-cd-minimal"
-                    "instantiate nixos/default.nix -A system --arg configuration 'import ${cdModule}'"
-                    nixos.system.drvPath
+                  +
+                    compare "nixos-installation-cd-minimal"
+                      "instantiate nixos/default.nix -A system --arg configuration 'import ${cdModule}'"
+                      nixos.system.drvPath
                 );
             };
             treefmt.programs.nixfmt.enable = true;

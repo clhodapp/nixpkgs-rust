@@ -17,7 +17,8 @@ let
   # the old one, and the binary would then not recognise imports of the
   # original tree. Copying it under its own name yields the same store path.
   base = baseNameOf (toString path);
-  storeName = if builtins.match "[0-9a-z]{32}-.*" base != null then builtins.substring 33 (-1) base else base;
+  storeName =
+    if builtins.match "[0-9a-z]{32}-.*" base != null then builtins.substring 33 (-1) base else base;
   root = builtins.path {
     inherit path;
     name = storeName;
