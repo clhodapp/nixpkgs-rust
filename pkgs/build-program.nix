@@ -62,7 +62,7 @@ stdenv.mkDerivation {
       ${lib.concatMapStringsSep " " (e: "--also-ext ${lib.escapeShellArg e}") alsoExt} \
       --extra nix/fetchurl.nix=${nix.src}/src/libexpr/fetchurl.nix
     # The generated workspace needs the dependency versions of the runtime;
-    # cargo adds the generated crates to the lock on its own.
+    # cargo adds the generated crates to the lock automatically.
     cp Cargo.lock gen/Cargo.lock
     j=$(( NIX_BUILD_CORES < ${toString jobs} ? NIX_BUILD_CORES : ${toString jobs} ))
     (cd gen && cargo build --release --offline -j "$j")

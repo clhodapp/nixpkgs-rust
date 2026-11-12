@@ -6,7 +6,7 @@
 //! A unit refers to an enclosing variable by capturing it; a unit that needs
 //! a variable its parent does not own makes the parent capture it too.
 //!
-//! Lazy expressions that cannot fail and need no code of their own (literals,
+//! Lazy expressions that cannot fail and need no separate code (literals,
 //! variables, lambdas, lists, attribute sets with static names, selections
 //! and applications of such) are built directly from runtime thunk kinds, so
 //! they cost no generated function.
@@ -76,7 +76,7 @@ struct Binding {
 }
 
 /// The captured values of a unit, as Rust expressions, and the calls that
-/// store them in a thunk or a lambda. Each number of captures has its own
+/// store them in a thunk or a lambda. Each number of captures has a separate
 /// runtime constructor, which builds the environment in the runtime: the
 /// generated crates are compiled without optimisation, and moving an
 /// environment through them would copy it with a `memcpy` call each time.
@@ -151,7 +151,7 @@ struct SetNode {
     /// The `e` of each `inherit (e)` at this level.
     temps: Vec<ast::Expr>,
     pos: u64,
-    /// Whether the values see the set's own attributes. When attribute paths
+    /// Whether the values see the attributes of the set. When attribute paths
     /// merge into a set, its first definition decides this, as in Nix.
     rec: bool,
 }
@@ -867,7 +867,7 @@ impl Compiler {
             Ok(format!("{{ {stmts}{} }}", body?))
         })?;
         // The creating unit may land in another crate than the body, and
-        // generated crates do not refer to each other, so it gets its own
+        // generated crates do not refer to each other, so it gets a separate
         // copy of the description under another name.
         let creator_name = format!("M{}", &info_name[1..]);
         let creator_info = info.replacen(&format!("static {info_name}:"), &format!("static {creator_name}:"), 1);
@@ -1129,7 +1129,7 @@ impl Compiler {
     /// [`Compiler::group`]. With `proxies`, used for a recursive set with
     /// `__overrides`, each name other than `__overrides` refers to a proxy
     /// thunk that takes the value from `__overrides` when it has the name,
-    /// so that the set's own attributes see the overridden values.
+    /// so that the attributes of the set see the overridden values.
     fn group_with(&mut self, mut set: SetNode, proxies: bool) -> Res<(String, Vec<(String, u32, u64)>)> {
         struct Item {
             name: Option<String>,
@@ -1351,7 +1351,7 @@ impl Compiler {
     }
 
     /// A recursive set. A static `__overrides` attribute, a legacy feature,
-    /// replaces attributes of the result with its own.
+    /// replaces attributes of the result with the attributes it holds.
     fn rec_set(&mut self, set: SetNode) -> Res<String> {
         let overrides = set.statics.contains_key("__overrides");
         let code = self.rec_set_inner(set)?;

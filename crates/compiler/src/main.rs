@@ -33,7 +33,7 @@ struct Args {
     /// File extensions compiled besides `nix`.
     also_ext: Vec<String>,
     /// Files outside the root that `<NAME>` search path lookups find, such
-    /// as Nix's own `nix/fetchurl.nix`, as (NAME, file).
+    /// as the `nix/fetchurl.nix` that Nix ships, as (NAME, file).
     extra: Vec<(String, String)>,
     /// The optimisation level of the generated crates in release builds.
     opt_level: u8,
@@ -90,7 +90,7 @@ fn parse_args() -> Result<Args, String> {
 
 /// The files to compile below a root, by the path an import would name.
 struct Tree {
-    /// Files compiled on their own, as paths relative to the root. A file
+    /// Files compiled directly, as paths relative to the root. A file
     /// below a symbolic link to a directory is listed under the link: Nix
     /// does not resolve such links in import paths, so the file's relative
     /// path literals resolve against the directory as named.

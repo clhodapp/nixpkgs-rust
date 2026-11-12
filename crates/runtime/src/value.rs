@@ -175,8 +175,8 @@ pub enum ThunkState {
 ///
 /// Forcing reads the state in place and replaces it only with the result:
 /// moving the state out and back would copy it twice per force. `running`
-/// marks a thunk being forced, which is how a thunk that needs its own value
-/// is detected.
+/// marks a thunk being forced, which is how a thunk whose value depends on
+/// that same value is detected.
 pub struct Thunk {
     pub state: RefCell<ThunkState>,
     running: std::cell::Cell<bool>,

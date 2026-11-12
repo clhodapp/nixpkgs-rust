@@ -17,7 +17,7 @@ Known failures of `lang-tests`: `eval-okay-flake-ref-to-string`,
 
 The generated nixpkgs program takes about 6.5 minutes to build with 16
 jobs and about 1 GB of memory per job. To iterate on the runtime, compile a
-small tree instead, such as nixpkgs' `lib` directory, whose own tests
+small tree instead, such as nixpkgs' `lib` directory, whose tests
 (`lib/tests/misc.nix`) print `[ ]` when they pass:
 
 ```zsh

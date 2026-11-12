@@ -102,7 +102,7 @@ pub fn write_identifier(out: &mut String, s: &str) {
 /// list held by a value it has already printed likewise. A set is
 /// recognised by its contents; a list by the value that holds it: the thunk
 /// it was reached through, or the list itself when it was stored directly.
-/// The top-level value is a value of its own, as the evaluator's result is.
+/// The top-level value counts as a separate value, as the evaluator's result does.
 pub fn print_strict(v: &Value) -> R<String> {
     let mut out = String::new();
     let mut seen = HashSet::new();

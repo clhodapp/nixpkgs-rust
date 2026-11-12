@@ -15,7 +15,7 @@
 let
   # Interpolating `path` would copy the tree to a new store path named after
   # the old one, and the binary would then not recognise imports of the
-  # original tree. Copying it under its own name yields the same store path.
+  # original tree. Copying it under the original name yields the same store path.
   base = baseNameOf (toString path);
   storeName =
     if builtins.match "[0-9a-z]{32}-.*" base != null then builtins.substring 33 (-1) base else base;
